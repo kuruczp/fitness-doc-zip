@@ -2,8 +2,10 @@
    A videók forrása a lejátszóból visszafejtve:
      index.php?module=videos&todo=lessons&action=str&ajax=1&course_id=X&video_id=Y
    Ez maga a videófájl-stream (a <source src> erre mutat).
-   A ZIP-et StreamSaver + client-zip streameli a lemezre, így nagy
-   összméretnél sem fogy el a memória. */
+   A ZIP-et a File System Access API (showSaveFilePicker) + client-zip
+   streameli egyenesen a lemezre, így nagy összméretnél sem fogy el a
+   memória — és nincs StreamSaver/MessageChannel, amit a böngésző-
+   bővítmények el tudnának rontani. (Chrome/Edge szükséges.) */
 (function () {
   function clean(s) {
     return (s || '')
@@ -48,16 +50,6 @@
     };
   })();
 
-  function loadScript(src) {
-    return new Promise(function (resolve, reject) {
-      var s = document.createElement('script');
-      s.src = src;
-      s.onload = resolve;
-      s.onerror = function () { reject(new Error('Could not load ' + src)); };
-      document.head.appendChild(s);
-    });
-  }
-
   function collect() {
     var items = [];
     document.querySelectorAll('.frame_right_box').forEach(function (box) {
@@ -75,13 +67,25 @@
   }
 
   async function main() {
-    ui.msg('Loading…');
-    await loadScript('https://cdn.jsdelivr.net/npm/streamsaver@2.0.6/StreamSaver.min.js');
-    var mod = await import('https://cdn.jsdelivr.net/npm/client-zip/index.js');
-    var downloadZip = mod.downloadZip;
-
     var items = collect();
     if (!items.length) { ui.msg('Nincs videó ezen az oldalon.', '#b00'); ui.done(); return; }
+
+    if (!window.showSaveFilePicker) {
+      ui.msg('Ehhez Chrome vagy Edge böngésző kell (File System Access API).', '#b00');
+      ui.done(); return;
+    }
+
+    // FONTOS: a mentési ablakot a kattintás gesztusán belül, MINDEN await ELŐTT
+    // kell megnyitni, különben elveszik a felhasználói aktiválás.
+    var handle = await window.showSaveFilePicker({
+      suggestedName: 'online-tudastar.zip',
+      types: [{ description: 'ZIP', accept: { 'application/zip': ['.zip'] } }]
+    });
+    var writable = await handle.createWritable();
+
+    ui.msg('Loading…');
+    var mod = await import('https://cdn.jsdelivr.net/npm/client-zip/index.js');
+    var downloadZip = mod.downloadZip;
 
     var total = items.length, done = 0, failed = 0, bytes = 0, used = {}, tick = 0;
     function status(idx, it) {
@@ -119,12 +123,14 @@
     }
 
     var zipResponse = downloadZip(gen());
-    var fileStream = window.streamSaver.createWriteStream('online-tudastar.zip');
-    await zipResponse.body.pipeTo(fileStream);
+    await zipResponse.body.pipeTo(writable);
 
     ui.msg('✓ Kész: ' + done + '/' + total + ' videó (' + fmt(bytes) + ')' + (failed ? ('\n' + failed + ' hiba — lásd konzol') : ''), failed ? '#c47f00' : '#2e7d32');
     ui.done();
   }
 
-  main().catch(function (e) { ui.msg('Hiba: ' + e.message, '#b00'); ui.done(); });
+  main().catch(function (e) {
+    if (e && e.name === 'AbortError') { ui.msg('Megszakítva.', '#7a8794'); ui.done(); return; }
+    ui.msg('Hiba: ' + (e && e.message || e), '#b00'); ui.done();
+  });
 })();
